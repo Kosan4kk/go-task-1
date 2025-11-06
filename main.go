@@ -18,7 +18,13 @@ type PodSpec struct {
 type Container struct {
 	Name      string    `yaml:"name"`
 	Image     string    `yaml:"image"`
+	Ports     []Port    `yaml:"ports"`
 	Resources Resources `yaml:"resources"`
+}
+
+type Port struct {
+	ContainerPort int    `yaml:"containerPort"`
+	Protocol      string `yaml:"protocol"`
 }
 
 type Resources struct {
@@ -77,12 +83,12 @@ func validateYAML(filename string) error {
 		}
 	}
 
-	// Find and validate CPU values in containers
+	// Find and validate containers
 	containersNode := findNode(&node, "spec", "containers")
 	if containersNode != nil && containersNode.Kind == yaml.SequenceNode {
 		for i := 0; i < len(containersNode.Content); i++ {
 			containerNode := containersNode.Content[i]
-			validateContainerCPU(containerNode, filename, &errors)
+			validateContainer(containerNode, filename, &errors)
 		}
 	}
 
@@ -109,15 +115,6 @@ func validateYAML(filename string) error {
 		return fmt.Errorf("spec.containers is required and must contain at least one container")
 	}
 
-	for i, container := range pod.Spec.Containers {
-		if container.Name == "" {
-			return fmt.Errorf("container %d name is required", i)
-		}
-		if container.Image == "" {
-			return fmt.Errorf("container %d image is required", i)
-		}
-	}
-
 	// Return all collected errors if any
 	if len(errors) > 0 {
 		return fmt.Errorf(strings.Join(errors, "\n"))
@@ -126,30 +123,38 @@ func validateYAML(filename string) error {
 	return nil
 }
 
-func findNode(root *yaml.Node, path ...string) *yaml.Node {
-	if root == nil || len(root.Content) == 0 {
-		return nil
+func validateContainer(containerNode *yaml.Node, filename string, errors *[]string) {
+	// Validate container name
+	nameNode := findNodeInMapping(containerNode, "name")
+	if nameNode != nil {
+		if nameNode.Value == "" {
+			*errors = append(*errors, fmt.Sprintf("%s:%d name is required", filename, nameNode.Line))
+		}
 	}
 
-	current := root.Content[0] // Document node
-	for _, segment := range path {
-		found := false
-		if current.Kind == yaml.MappingNode {
-			for i := 0; i < len(current.Content); i += 2 {
-				key := current.Content[i]
-				value := current.Content[i+1]
-				if key.Value == segment {
-					current = value
-					found = true
-					break
-				}
-			}
-		}
-		if !found {
-			return nil
+	// Validate container ports
+	portsNode := findNodeInMapping(containerNode, "ports")
+	if portsNode != nil && portsNode.Kind == yaml.SequenceNode {
+		for i := 0; i < len(portsNode.Content); i++ {
+			portNode := portsNode.Content[i]
+			validateContainerPort(portNode, filename, errors)
 		}
 	}
-	return current
+
+	// Validate CPU resources
+	validateContainerCPU(containerNode, filename, errors)
+}
+
+func validateContainerPort(portNode *yaml.Node, filename string, errors *[]string) {
+	containerPortNode := findNodeInMapping(portNode, "containerPort")
+	if containerPortNode != nil && containerPortNode.Kind == yaml.ScalarNode {
+		port, err := strconv.Atoi(containerPortNode.Value)
+		if err != nil {
+			*errors = append(*errors, fmt.Sprintf("%s:%d containerPort must be integer", filename, containerPortNode.Line))
+		} else if port < 1 || port > 65535 {
+			*errors = append(*errors, fmt.Sprintf("%s:%d containerPort value out of range", filename, containerPortNode.Line))
+		}
+	}
 }
 
 func validateContainerCPU(containerNode *yaml.Node, filename string, errors *[]string) {
@@ -177,6 +182,32 @@ func validateContainerCPU(containerNode *yaml.Node, filename string, errors *[]s
 			}
 		}
 	}
+}
+
+func findNode(root *yaml.Node, path ...string) *yaml.Node {
+	if root == nil || len(root.Content) == 0 {
+		return nil
+	}
+
+	current := root.Content[0] // Document node
+	for _, segment := range path {
+		found := false
+		if current.Kind == yaml.MappingNode {
+			for i := 0; i < len(current.Content); i += 2 {
+				key := current.Content[i]
+				value := current.Content[i+1]
+				if key.Value == segment {
+					current = value
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			return nil
+		}
+	}
+	return current
 }
 
 func findNodeInMapping(mapping *yaml.Node, key string) *yaml.Node {
