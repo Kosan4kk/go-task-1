@@ -31,6 +31,10 @@ func main() {
 	var errors []string
 
 	// Получаем корневую ноду
+	if len(node.Content) == 0 {
+		fmt.Fprintf(os.Stderr, "%s:1 empty document\n", filename)
+		os.Exit(1)
+	}
 	doc := node.Content[0]
 	if doc.Kind != yaml.MappingNode {
 		fmt.Fprintf(os.Stderr, "%s:1 root must be mapping\n", filename)
@@ -50,7 +54,10 @@ func main() {
 	checkSpec(doc, filename, &errors)
 
 	if len(errors) > 0 {
-		fmt.Fprintf(os.Stderr, "%s\n", strings.Join(errors, "\n"))
+		// ВЫВОДИМ ВСЕ ОШИБКИ В STDERR
+		for _, err := range errors {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
 }
@@ -148,17 +155,13 @@ func checkSpec(doc *yaml.Node, filename string, errors *[]string) {
 func checkContainer(container *yaml.Node, filename string, index int, errors *[]string) {
 	// Проверяем имя
 	nameNode := getField(container, "name")
-	if nameNode == nil {
-		*errors = append(*errors, fmt.Sprintf("%s:%d name is required", filename, container.Line))
-	} else if nameNode.Value == "" {
+	if nameNode != nil && nameNode.Value == "" {
 		*errors = append(*errors, fmt.Sprintf("%s:%d name is required", filename, nameNode.Line))
 	}
 
 	// Проверяем image
 	imageNode := getField(container, "image")
-	if imageNode == nil {
-		*errors = append(*errors, fmt.Sprintf("%s:%d image is required", filename, container.Line))
-	} else if imageNode.Value == "" {
+	if imageNode != nil && imageNode.Value == "" {
 		*errors = append(*errors, fmt.Sprintf("%s:%d image is required", filename, imageNode.Line))
 	}
 
