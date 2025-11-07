@@ -67,23 +67,15 @@ func validateYAML(filename string) error {
 		return fmt.Errorf("%s: cannot read file: %v", filename, err)
 	}
 
-	// First pass: parse with detailed node information to get line numbers
 	var node yaml.Node
 	if err := yaml.Unmarshal(content, &node); err != nil {
 		return fmt.Errorf("%s: cannot unmarshal YAML: %v", filename, err)
 	}
 
-	// Collect all validation errors
 	var errors []string
 
-	// Find and validate spec.os
-	if osNode := findNode(&node, "spec", "os"); osNode != nil {
-		if osNode.Value != "linux" && osNode.Value != "windows" {
-			errors = append(errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", filename, osNode.Line, osNode.Value))
-		}
-	}
+	validateBasicStructure(&node, filename, &errors)
 
-	// Find and validate containers
 	containersNode := findNode(&node, "spec", "containers")
 	if containersNode != nil && containersNode.Kind == yaml.SequenceNode {
 		for i := 0; i < len(containersNode.Content); i++ {
@@ -92,30 +84,6 @@ func validateYAML(filename string) error {
 		}
 	}
 
-	// Second pass: validate basic structure with typed struct
-	var pod Pod
-	if err := yaml.Unmarshal(content, &pod); err != nil {
-		return fmt.Errorf("%s: cannot unmarshal YAML: %v", filename, err)
-	}
-
-	// Basic validations
-	if pod.APIVersion != "v1" {
-		return fmt.Errorf("apiVersion is required and must be 'v1'")
-	}
-
-	if pod.Kind != "Pod" {
-		return fmt.Errorf("kind is required and must be 'Pod'")
-	}
-
-	if pod.Metadata.Name == "" {
-		return fmt.Errorf("metadata.name is required")
-	}
-
-	if len(pod.Spec.Containers) == 0 {
-		return fmt.Errorf("spec.containers is required and must contain at least one container")
-	}
-
-	// Return all collected errors if any
 	if len(errors) > 0 {
 		return fmt.Errorf(strings.Join(errors, "\n"))
 	}
@@ -123,16 +91,54 @@ func validateYAML(filename string) error {
 	return nil
 }
 
-func validateContainer(containerNode *yaml.Node, filename string, errors *[]string) {
-	// Validate container name
-	nameNode := findNodeInMapping(containerNode, "name")
-	if nameNode != nil {
-		if nameNode.Value == "" {
-			*errors = append(*errors, fmt.Sprintf("%s:%d name is required", filename, nameNode.Line))
+func validateBasicStructure(root *yaml.Node, filename string, errors *[]string) {
+	apiVersionNode := findNode(root, "apiVersion")
+	if apiVersionNode == nil {
+		*errors = append(*errors, fmt.Sprintf("%s:1 apiVersion is required", filename))
+	} else if apiVersionNode.Value != "v1" {
+		*errors = append(*errors, fmt.Sprintf("%s:%d apiVersion must be 'v1'", filename, apiVersionNode.Line))
+	}
+
+	kindNode := findNode(root, "kind")
+	if kindNode == nil {
+		*errors = append(*errors, fmt.Sprintf("%s:1 kind is required", filename))
+	} else if kindNode.Value != "Pod" {
+		*errors = append(*errors, fmt.Sprintf("%s:%d kind must be 'Pod'", filename, kindNode.Line))
+	}
+
+	nameNode := findNode(root, "metadata", "name")
+	if nameNode == nil {
+		*errors = append(*errors, fmt.Sprintf("%s:1 metadata.name is required", filename))
+	} else if nameNode.Value == "" {
+		*errors = append(*errors, fmt.Sprintf("%s:%d name is required", filename, nameNode.Line))
+	}
+
+	osNode := findNode(root, "spec", "os")
+	if osNode != nil {
+		if osNode.Value != "linux" && osNode.Value != "windows" {
+			*errors = append(*errors, fmt.Sprintf("%s:%d os has unsupported value '%s'", filename, osNode.Line, osNode.Value))
 		}
 	}
 
-	// Validate container ports
+	containersNode := findNode(root, "spec", "containers")
+	if containersNode == nil {
+		*errors = append(*errors, fmt.Sprintf("%s:1 spec.containers is required", filename))
+	} else if containersNode.Kind == yaml.SequenceNode && len(containersNode.Content) == 0 {
+		*errors = append(*errors, fmt.Sprintf("%s:%d spec.containers must contain at least one container", filename, containersNode.Line))
+	}
+}
+
+func validateContainer(containerNode *yaml.Node, filename string, errors *[]string) {
+	nameNode := findNodeInMapping(containerNode, "name")
+	if nameNode != nil && nameNode.Value == "" {
+		*errors = append(*errors, fmt.Sprintf("%s:%d name is required", filename, nameNode.Line))
+	}
+
+	imageNode := findNodeInMapping(containerNode, "image")
+	if imageNode != nil && imageNode.Value == "" {
+		*errors = append(*errors, fmt.Sprintf("%s:%d image is required", filename, imageNode.Line))
+	}
+
 	portsNode := findNodeInMapping(containerNode, "ports")
 	if portsNode != nil && portsNode.Kind == yaml.SequenceNode {
 		for i := 0; i < len(portsNode.Content); i++ {
@@ -141,7 +147,6 @@ func validateContainer(containerNode *yaml.Node, filename string, errors *[]stri
 		}
 	}
 
-	// Validate CPU resources
 	validateContainerCPU(containerNode, filename, errors)
 }
 
@@ -163,23 +168,20 @@ func validateContainerCPU(containerNode *yaml.Node, filename string, errors *[]s
 		return
 	}
 
-	limitsNode := findNodeInMapping(resourcesNode, "limits")
-	if limitsNode != nil {
-		cpuNode := findNodeInMapping(limitsNode, "cpu")
-		if cpuNode != nil && cpuNode.Kind == yaml.ScalarNode {
-			if _, err := strconv.Atoi(cpuNode.Value); err != nil {
-				*errors = append(*errors, fmt.Sprintf("%s:%d cpu must be int", filename, cpuNode.Line))
-			}
-		}
+	validateCPUInResources(resourcesNode, "limits", filename, errors)
+	validateCPUInResources(resourcesNode, "requests", filename, errors)
+}
+
+func validateCPUInResources(resourcesNode *yaml.Node, resourceType string, filename string, errors *[]string) {
+	resourceNode := findNodeInMapping(resourcesNode, resourceType)
+	if resourceNode == nil {
+		return
 	}
 
-	requestsNode := findNodeInMapping(resourcesNode, "requests")
-	if requestsNode != nil {
-		cpuNode := findNodeInMapping(requestsNode, "cpu")
-		if cpuNode != nil && cpuNode.Kind == yaml.ScalarNode {
-			if _, err := strconv.Atoi(cpuNode.Value); err != nil {
-				*errors = append(*errors, fmt.Sprintf("%s:%d cpu must be int", filename, cpuNode.Line))
-			}
+	cpuNode := findNodeInMapping(resourceNode, "cpu")
+	if cpuNode != nil && cpuNode.Kind == yaml.ScalarNode {
+		if _, err := strconv.Atoi(cpuNode.Value); err != nil {
+			*errors = append(*errors, fmt.Sprintf("%s:%d cpu must be int", filename, cpuNode.Line))
 		}
 	}
 }
@@ -189,7 +191,7 @@ func findNode(root *yaml.Node, path ...string) *yaml.Node {
 		return nil
 	}
 
-	current := root.Content[0] // Document node
+	current := root.Content[0]
 	for _, segment := range path {
 		found := false
 		if current.Kind == yaml.MappingNode {
